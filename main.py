@@ -17,9 +17,9 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # Geminiの設定
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 
-# 初期点数（4人分）
+# 初期点数（4人分・名前をローマ字表記に変更）
 current_scores = {
-    "諒粋": 25000,
+    "Ryosui": 25000,
     "Sho": 25000,
     "Yuya": 25000,
     "Kohei": 25000
@@ -43,13 +43,24 @@ SYSTEM_PROMPT = """
 - ロン: アガった人にプラス、振り込んだ人にマイナス。
 - ツモ: アガった人にプラス。支払いは、アガった人が「親」なら子が均等に支払い、「子」なら親が半分、残りの子が半分ずつ支払います。
 
+【流局（リュウキョク）ルールの解釈】
+テキストに「流局」や「ノーテン」といったキーワードがある場合は、テンパイ（聴牌）している人とノーテン（不聴）の人に分かれて、場風のノーテン罰符（計3000点）をやり取りします。
+- 全員ノーテン、または全員テンパイ: 点数移動は「全員 0点」です。
+- 1人テンパイ: テンパイした人が「+3000点」、ノーテンの3人が「-1000点」ずつ。
+- 2人テンパイ: テンパイした2人が「+1500点」ずつ、ノーテンの2人が「-1500点」ずつ。
+- 3人テンパイ: テンパイした3人が「+1000点」ずつ、ノーテンの1人が「-3000点」。
+※もしテキストから誰がテンパイしているか判断できない場合は、successをfalseにして「誰がテンパイしてた？」と聞き返してください。
+
+【名前の表記について】
+ユーザーが日本語で「りょうすい」や「諒粋」と入力した場合でも、内部データの「Ryosui」として正しく処理してください。
+
 【出力フォーマット】
 一切の解説文を排除し、必ず以下のJSON形式でのみ返答してください。Markdownの枠組み（```json 等）も含めず、純粋なJSON文字列のみを出力してください。
 {
   "success": true,
-  "message": "LINEでユーザーに返す分かりやすい報告文",
+  "message": "LINEでユーザーに返す分かりやすい報告文（例：流局ですね。Shoさん1人テンパイなので+3000点、他3人は-1000点です）",
   "new_scores": {
-    "諒粋": 25000,
+    "Ryosui": 25000,
     "Sho": 25000,
     "Yuya": 25000,
     "Kohei": 25000
@@ -73,17 +84,12 @@ def handle_message(event):
     user_message = event.message.text
 
     try:
-        # Geminiモデルの起動 (最新の高速・軽量モデルを指定)
         model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        # AIエージェントへの入力データ作成
         prompt = f"{SYSTEM_PROMPT}\n\n現在の点数:\n{json.dumps(current_scores, ensure_ascii=False)}\n\n対局結果:\n「{user_message}」"
         
-        # Geminiにリクエスト送信
         response = model.generate_content(prompt)
         ai_reply = response.text.strip()
         
-        # AIの返答（JSON）を解析
         result = json.loads(ai_reply)
         
         if result.get("success"):
