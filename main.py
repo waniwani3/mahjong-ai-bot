@@ -4,20 +4,19 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import openai
+import google.generativeai as genai
 
 app = Flask(__name__)
 
-# LINEの設定（環境変数から読み込みます）
+# LINEの設定
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# OpenAIの設定
-openai.api_key = os.environ.get("OPENAI_API_KEY")
+# Geminiの設定
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 
-# 簡易的なデータベースの代わり（本来はファイルやDBに保存しますが、まずはメモリ上に保持）
 # 初期点数（4人分）
 current_scores = {
     "諒粋": 25000,
@@ -29,7 +28,7 @@ current_scores = {
 SYSTEM_PROMPT = """
 あなたは麻雀の点数移動を管理する優秀なエージェントです。
 ユーザーから「現在の4人の点数」と「対局結果のテキスト」が送られてきます。
-以下のルールに従って新しい点数を計算し、必ず指定のJSONフォーマットでのみ出力してください。
+以下のルールに従って新しい点数（引き算・足し算）を計算し、必ず指定のJSONフォーマットでのみ出力してください。
 
 【点数計算の基本ルール】
 1. テキストに「3900」「8000」などの具体的な数字がある場合は、その点数を移動させます。
@@ -45,7 +44,7 @@ SYSTEM_PROMPT = """
 - ツモ: アガった人にプラス。支払いは、アガった人が「親」なら子が均等に支払い、「子」なら親が半分、残りの子が半分ずつ支払います。
 
 【出力フォーマット】
-一切の解説を排除し、必ず以下のJSON形式でのみ返答してください。
+一切の解説文を排除し、必ず以下のJSON形式でのみ返答してください。Markdownの枠組み（```json 等）も含めず、純粋なJSON文字列のみを出力してください。
 {
   "success": true,
   "message": "LINEでユーザーに返す分かりやすい報告文",
@@ -73,25 +72,22 @@ def handle_message(event):
     global current_scores
     user_message = event.message.text
 
-    # AIエージェントを呼び出す
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini", # コスパの良い軽量モデル
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"現在の点数:\n{json.dumps(current_scores, ensure_ascii=False)}\n\n対局結果:\n「{user_message}」"}
-            ],
-            temperature=0
-        )
+        # Geminiモデルの起動 (最新の高速・軽量モデルを指定)
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        
+        # AIエージェントへの入力データ作成
+        prompt = f"{SYSTEM_PROMPT}\n\n現在の点数:\n{json.dumps(current_scores, ensure_ascii=False)}\n\n対局結果:\n「{user_message}」"
+        
+        # Geminiにリクエスト送信
+        response = model.generate_content(prompt)
+        ai_reply = response.text.strip()
         
         # AIの返答（JSON）を解析
-        ai_reply = response.choices[0].message.content.strip()
         result = json.loads(ai_reply)
         
         if result.get("success"):
-            # 点数を更新
             current_scores = result.get("new_scores")
-            # 返信用メッセージ作成
             reply_text = f"{result.get('message')}\n\n【現在の持ち点】\n"
             for name, score in current_scores.items():
                 reply_text += f"・{name}: {score}点\n"
@@ -99,7 +95,7 @@ def handle_message(event):
             reply_text = result.get("message")
             
     except Exception as e:
-        reply_text = f"エラーが発生しました。もう一度入力するか、言い方を変えてみてください。（エラー詳細: {str(e)}）"
+        reply_text = f"エラーが発生しました。もう一度入力するか、言い方を変えてみてください。（詳細: {str(e)}）"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
