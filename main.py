@@ -1,5 +1,6 @@
 import os
 import json
+import copy
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -17,13 +18,17 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # Geminiの設定
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 
-# 初期点数（4人分・名前をローマ字表記に変更）
-current_scores = {
+# 初期点数
+INITIAL_SCORES = {
     "Ryosui": 25000,
     "Sho": 25000,
     "Yuya": 25000,
     "Kohei": 25000
 }
+
+# グローバル変数で現在の点数と「1手前の点数」を管理
+current_scores = copy.deepcopy(INITIAL_SCORES)
+previous_scores = copy.deepcopy(INITIAL_SCORES)
 
 SYSTEM_PROMPT = """
 あなたは麻雀の点数移動を管理する優秀なエージェントです。
@@ -49,7 +54,6 @@ SYSTEM_PROMPT = """
 - 1人テンパイ: テンパイした人が「+3000点」、ノーテンの3人が「-1000点」ずつ。
 - 2人テンパイ: テンパイした2人が「+1500点」ずつ、ノーテンの2人が「-1500点」ずつ。
 - 3人テンパイ: テンパイした3人が「+1000点」ずつ、ノーテンの1人が「-3000点」。
-※もしテキストから誰がテンパイしているか判断できない場合は、successをfalseにして「誰がテンパイしてた？」と聞き返してください。
 
 【名前の表記について】
 ユーザーが日本語で「りょうすい」や「諒粋」と入力した場合でも、内部データの「Ryosui」として正しく処理してください。
@@ -58,7 +62,7 @@ SYSTEM_PROMPT = """
 一切の解説文を排除し、必ず以下のJSON形式でのみ返答してください。Markdownの枠組み（```json 等）も含めず、純粋なJSON文字列のみを出力してください。
 {
   "success": true,
-  "message": "LINEでユーザーに返す分かりやすい報告文（例：流局ですね。Shoさん1人テンパイなので+3000点、他3人は-1000点です）",
+  "message": "LINEでユーザーに返す分かりやすい報告文",
   "new_scores": {
     "Ryosui": 25000,
     "Sho": 25000,
@@ -80,10 +84,33 @@ def webhook():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    global current_scores
-    user_message = event.message.text
+    global current_scores, previous_scores
+    user_message = event.message.text.strip()
 
+    # 特殊コマンド①：リセット機能
+    if user_message in ["リセット", "最初から", "スタート", "reset"]:
+        previous_scores = copy.deepcopy(current_scores)  # 一応戻せるように保存
+        current_scores = copy.deepcopy(INITIAL_SCORES)
+        reply_text = "点数を初期状態（全員25000点）にリセットしました！新しい対局を始めてください。\n\n"
+        for name, score in current_scores.items():
+            reply_text += f"・{name}: {score}点\n"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        return
+
+    # 特殊コマンド②：取り消し機能
+    if user_message in ["取り消し", "とりけし", "戻して", "undo"]:
+        current_scores = copy.deepcopy(previous_scores)
+        reply_text = "1回前の入力点数に戻しました！\n\n【現在の持ち点】\n"
+        for name, score in current_scores.items():
+            reply_text += f"・{name}: {score}点\n"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        return
+
+    # 通常の点数計算処理
     try:
+        # AIに投げる前に現在の状態をバックアップ
+        backup_scores = copy.deepcopy(current_scores)
+        
         model = genai.GenerativeModel('gemini-2.5-flash')
         prompt = f"{SYSTEM_PROMPT}\n\n現在の点数:\n{json.dumps(current_scores, ensure_ascii=False)}\n\n対局結果:\n「{user_message}」"
         
@@ -93,6 +120,7 @@ def handle_message(event):
         result = json.loads(ai_reply)
         
         if result.get("success"):
+            previous_scores = backup_scores  # 成功時のみバックアップを確定
             current_scores = result.get("new_scores")
             reply_text = f"{result.get('message')}\n\n【現在の持ち点】\n"
             for name, score in current_scores.items():
